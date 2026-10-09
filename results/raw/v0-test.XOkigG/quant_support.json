@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "shape": [
+    32,
+    128
+  ],
+  "format": "E4M3FN",
+  "cpu_reference": {
+    "status": "pass",
+    "finite_code_roundtrip": true,
+    "max_finite": 448.0,
+    "nonfinite_policy": "reject",
+    "rounding": "nearest_ties_to_even",
+    "overflow_policy": "saturate"
+  },
+  "paths": {
+    "int8": {
+      "status": "pass",
+      "reference_match": true,
+      "storage_element_bytes": 1,
+      "storage_bytes": 4096,
+      "mse": 205.05740356445312,
+      "max_abs_error": 321.0,
+      "latency": {
+        "p50_ms": 0.1356479972600937,
+        "p95_ms": 0.1555136017501354
+      },
+      "graph": {
+        "status": "pass",
+        "dynamic_input_replay": true
+      }
+    },
+    "torch_fp8": {
+      "status": "pass",
+      "reference_match": true,
+      "storage_element_bytes": 1,
+      "storage_bytes": 4096,
+      "mse": 0.0006416051182895899,
+      "max_abs_error": 0.125,
+      "latency": {
+        "p50_ms": 0.10839999839663506,
+        "p95_ms": 0.15583680421113963
+      },
+      "graph": {
+        "status": "pass",
+        "dynamic_input_replay": true
+      }
+    },
+    "software_fp8": {
+      "status": "pass",
+      "reference_match": true,
+      "storage_element_bytes": 1,
+      "storage_bytes": 4096,
+      "mse": 0.0006416051182895899,
+      "max_abs_error": 0.125,
+      "latency": {
+        "p50_ms": 0.47784000635147095,
+        "p95_ms": 0.5558271944522858
+      },
+      "graph": {
+        "status": "pass",
+        "dynamic_input_replay": true
+      }
+    },
+    "triton_fp8": {
+      "status": "fail",
+      "error": "at 1:0:\ndef fp8_roundtrip_kernel(X, Q, Y, N: tl.constexpr, B: tl.constexpr):\n^\nValueError(\"type fp8e4nv not supported in this architecture. The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')\")"
+    },
+    "triton_software_lut_decode": {
+      "status": "pass",
+      "reference_match": true,
+      "storage_element_bytes": 1,
+      "storage_bytes": 4096,
+      "mse": 0.0006416051182895899,
+      "max_abs_error": 0.125,
+      "latency": {
+        "p50_ms": 0.06758400052785873,
+        "p95_ms": 0.09850879944860932
+      },
+      "graph": {
+        "status": "pass",
+        "dynamic_input_replay": true
+      }
+    }
+  },
+  "native_fp8_tensor_core_test": "not_supported_on_SM86",
+  "note": "\u8f6c\u6362\u6210\u529f\u4e0d\u8868\u793a\u539f\u751fFP8\u77e9\u9635\u4e58\u6216Attention\u6210\u529f",
+  "device": "NVIDIA GeForce RTX 3090",
+  "compute_capability": [
+    8,
+    6
+  ],
+  "torch": "2.11.0+cu128",
+  "triton": "3.6.0",
+  "torch_cuda": "12.8",
+  "timing_scope": "CUDA-event conversion path, including its allocations; not attention latency"
+}

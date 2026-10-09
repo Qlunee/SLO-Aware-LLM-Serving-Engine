@@ -1,0 +1,17 @@
+{
+  "model": "/home/lq/vllm-1p1d-v029/model/Qwen3-4B",
+  "model_revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+  "trace": "results/raw/v0-test.065cNM/simultaneous.jsonl",
+  "out": "results/raw/v0-test.065cNM/minimal_1",
+  "observation": "minimal",
+  "sampler": "greedy",
+  "drain_s": 60.0,
+  "tp": 2,
+  "max_model_len": 1024,
+  "max_num_seqs": 8,
+  "token_budget": 256,
+  "gpu_memory_utilization": 0.5,
+  "block_size": 256,
+  "graph": false,
+  "seed": 42
+}

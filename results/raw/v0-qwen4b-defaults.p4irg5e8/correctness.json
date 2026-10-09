@@ -1,0 +1,33 @@
+{
+  "trace_sha256": "616a72146283354254bbff0003fc31b8e3350ef3cb0f2937a7f87969a3056e47",
+  "passed": true,
+  "matched_requests": 2,
+  "total_requests": 2,
+  "token_match_rate": 1.0,
+  "cases": [
+    {
+      "request_id": "r00000000",
+      "match": true,
+      "reference_tokens": [
+        11,
+        323
+      ],
+      "observed_tokens": [
+        11,
+        323
+      ]
+    },
+    {
+      "request_id": "r00000001",
+      "match": true,
+      "reference_tokens": [
+        198,
+        2132
+      ],
+      "observed_tokens": [
+        198,
+        2132
+      ]
+    }
+  ]
+}
