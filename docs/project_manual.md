@@ -4,7 +4,7 @@
 >
 > 实现主线：混合Prefill/Decode执行 → Decode-Slack自适应调度 → 量化Paged KV Cache与融合反量化GQA Decode。
 >
-> 本文规定待实现功能和验收流程，不代表功能已完成或性能数字已取得。按V0–V10逐步推进，每阶段保存代码版本、配置、原始数据与阶段报告。
+> 本文按V0–V6共7个正式版本组织功能与验收，保留V0、V1已有实现和历史记录，后续推进V2–V6共5个版本。版本合并不删减核心功能、对照实验、质量门槛和原始证据；已实现不等于完整验收通过或性能数字已取得。每阶段保存代码版本、配置、原始数据与阶段报告。
 
 ## 0. 项目目标与范围
 
@@ -31,7 +31,7 @@
 
 原始版本常见接口为schedule返回整批is_prefill、ModelRunner分阶段prepare。上游会更新，开发依据冻结版本而非假设main永远不变。
 
-本次修订统一代码与手册的模型基准。V0测量代码及部分GPU回归已有产物，具体证据见仓库docs/versions/V0.md；其余目录、接口、Tag和验收标准仍为实现计划，不能将计划或回归通过表述为已取得性能优化收益。
+本次修订保留Qwen3-4B统一模型基准，并将路线合并为7个正式版本。按当前项目进度，V0、V1已实现；V0测量与回归证据见仓库docs/versions/V0.md，V1实现入口及验收边界见本手册V1.4与仓库docs/versions/V1.md。具体通过矩阵与性能结果以阶段报告和原始数据为准；V2–V6及尚未落地的目录、接口、Tag仍为实现计划，不能将计划或回归通过表述为已取得性能优化收益。
 
 ### 0.3 硬件选择
 
@@ -61,13 +61,13 @@
 9. 质量评估、Graph Replay和TP=2回归；
 10. 调度×量化×Kernel组合实验、原始数据和失败边界。
 
-加入量化Kernel后，原4–6周不作为全部功能的完成承诺。建议8–12周：V0–V2约2周，V3–V4约1周，V5–V7约2–3周，V8约2周，V9–V10约2–4周，按经验调整。
+加入量化Kernel后，原4–6周不作为全部功能的完成承诺。完整项目约8–12周仅作粗略参考，不因版本合并而同比缩短。当前V0、V1已实现，剩余工作按V2基线扫描、V3完整调度、V4量化参考与真实缓存、V5融合Decode、V6集成与最终实验重新估算；结合已有验收证据、GPU可用时间与失败修复调整，不以版本数量推算工期。V4内部检查点顺序推进，V6的质量预算与兼容性设计提前在V4、V5准备。
 
 时间不足时先延期原生FP8计算、静态K校准优化、复杂Split-KV、Mixed Graph Bucket；保持测量、真实存储、融合Decode、数值质量和端到端消融。
 
 ### 0.5 统一模型基准：Qwen3-4B
 
-V0–V10的快速验证、正确性回归、调度实验、量化质量与主性能结果统一使用**Qwen/Qwen3-4B、BF16权重**。取消原“先0.6B验收、8B主结果”的要求。其他模型仅作明确标注的扩展，不混入4B结果，也不把旧模型的吞吐、SLO阈值或饱和RPS直接迁移到4B。
+V0–V6的快速验证、正确性回归、调度实验、量化质量与主性能结果统一使用**Qwen/Qwen3-4B、BF16权重**。取消原“先0.6B验收、8B主结果”的要求。其他模型仅作明确标注的扩展，不混入4B结果，也不把旧模型的吞吐、SLO阈值或饱和RPS直接迁移到4B。
 
 - 配置唯一来源：仓库configs/qwen3_4b.json；
 - 本服务器模型目录：/home/lq/vllm-1p1d-v029/model/Qwen3-4B；
@@ -192,21 +192,33 @@ PagedAttention描述缓存分页，FlashAttention描述分块计算与IO优化�
 
 ### 2.1 路线总览
 
+共7个正式版本，V0、V1沿用已有编号和记录；后续只新增V2–V6。表中Tag为目标名称，仅在对应阶段验收通过后创建。
+
 | 版本 | 目标 | Tag |
 |---|---|---|
 | V0 | 环境、在线测量、原始基线、格式能力探测 | v0-measurement |
 | V1 | 非量化Mixed Batch与状态正确性 | v1-mixed-batch |
-| V2 | 固定策略、负载与容量基线 | v2-baselines |
-| V3 | Slack-only预算与Step预测 | v3-slack |
-| V4 | Aging与KV水位独立消融 | v4-guards |
-| V5 | BF16 Paged GQA Decode参考与后端接口 | v5-paged-gqa |
-| V6 | FP8/INT8数值参考与Scale契约 | v6-quant-reference |
-| V7 | 量化写入、真实缓存、Gather+FA接入 | v7-quant-cache |
-| V8 | 融合反量化GQA Decode | v8-fused-decode |
-| V9 | Prefix、Graph、TP兼容与预测器重标定 | v9-integration |
-| V10 | 质量、组合消融、边界与交付 | v10-final |
+| V2 | 固定策略、工作负载与容量基线 | v2-baselines |
+| V3 | Step预测、Slack预算、Hysteresis、Aging与KV Guard | v3-slo-scheduler |
+| V4 | 高精度参考、量化契约、真实量化Cache与Gather+FA接入 | v4-quant-cache |
+| V5 | 融合反量化Paged GQA Decode | v5-fused-decode |
+| V6 | Graph/TP集成、预测器重标定、质量与组合实验、最终交付 | v6-final |
 
-默认顺序逐版本推进；V5只依赖V2的执行接口，可在V4稳定后实施。旧V4/V5的Aging与水位合并为新V4，旧Graph/最终交付扩展为新V9/V10。旧Tag不得直接冒充新版。
+默认按V2 → V3 → V4 → V5 → V6推进。V2保留为独立基线阶段，V5保留为独立Kernel阶段。V4内部依次通过高精度参考、量化契约、真实Cache三个检查点；检查点不是新增正式版本。V4的后端接口与参考实现可基于V1/V2执行路径准备，但正式调度对照先在BF16路径下完成。兼容性设计和初步质量检查随V4/V5开展，V6集中完成完整回归与最终实验。
+
+以下“旧版”专指本次合并前的V0–V10路线，不指更早修订中的同名编号。
+
+| 合并前版本 | 本手册版本 | 迁移范围 |
+|---|---|---|
+| 旧版V0 | V0 | 保留已有实现、报告、命令与Tag |
+| 旧版V1 | V1 | 保留已有实现、报告、命令与Tag |
+| 旧版V2 | V2 | 固定策略、负载与容量基线 |
+| 旧版V3＋旧版V4 | V3 | Slack与预测器、Aging、KV Guard及独立消融 |
+| 旧版V5＋旧版V6＋旧版V7 | V4 | BF16参考、数值契约、真实量化Cache、Prefix与Gather路径 |
+| 旧版V8 | V5 | 融合Decode及三组对照 |
+| 旧版V9＋旧版V10 | V6 | Graph、TP、重标定、质量、组合实验与交付 |
+
+已有V0/V1代码、阶段报告、测试入口、原始数据及Tag保持原样，缺失证据另补，不因重编号重跑全部历史实验。如已存在旧版V2及后续报告或Tag，保留原件并标注旧路线身份，建立到新版本的映射；不得覆盖、移动已有Tag，或用改名代替新版验收。未来报告按新路线记录，引用历史产物时同时标明旧版本、commit、配置与数据路径。
 
 ### 2.2 分阶段交付清单
 
@@ -214,17 +226,13 @@ PagedAttention描述缓存分页，FlashAttention描述分块计算与IO优化�
 |---|---|---|
 | V0 | benchmarks/v0与格式能力探测 | 环境、到达Trace、请求/Step日志、量化支持报告 |
 | V1 | Scheduler、Sequence、BatchMetadata、ModelRunner | Mixed Forward设计、状态不变量与非量化输出对齐报告 |
-| V2 | 固定策略、workloads、容量搜索 | 最佳固定参数、容量曲线、真实/合成负载定义 |
-| V3 | profile_step_time与Slack控制器 | 预测器版本、独立误差、Budget轨迹与调度消融 |
-| V4 | Aging与KV Guard | 等待段、饥饿定义、独立收益及约束冲突报告 |
-| V5 | backend接口与BF16 Paged GQA | FP32参考、分页测试矩阵、BF16微基准 |
-| V6 | quantization与数值参考 | 格式/Scale契约、编码测试、初步质量与存储核算 |
-| V7 | quant_store、gather_dequant、Cache分配 | 真实显存、Scale生命周期、Prefix与写入报告 |
-| V8 | quantized_decode与可选Merge | 相同量化参考对齐、Gather/Fused/BF16对照 |
-| V9 | Graph、TP metadata与重标定 | Replay回归、拓扑、通信、量化时延profile |
-| V10 | evaluation与组合实验 | 质量门槛、全链路消融、失败边界及简历实测数字 |
+| V2 | 固定策略、workloads、容量搜索 | 最佳固定参数、容量曲线、真实/合成负载定义、正式Decode Stall对照 |
+| V3 | profile_step_time、Slack控制器、Aging与KV Guard | 预测器版本与独立误差、Budget轨迹、五组调度消融、等待段与约束冲突报告 |
+| V4 | backend、BF16参考、quantization、quant_store、gather_dequant、Cache分配 | FP32真值与分页矩阵、格式/Scale契约、编码测试、真实显存、Prefix生命周期、初步质量及冻结质量预算 |
+| V5 | quantized_decode与可选Merge | 相同量化参考对齐、Gather/Fused/BF16对照、Kernel微基准与失败shape |
+| V6 | Graph、TP metadata、重标定、evaluation与组合实验 | Replay/TP回归、拓扑与通信、量化时延profile、独立质量、全链路消融、失败边界及简历实测数字 |
 
-每个阶段新增docs/versions/Vn.md，填写输入版本、修改文件、运行命令、配置、原始数据位置和退出条件。阶段退出表示实现和证据齐全；是否可以宣称性能优化，还需实际收益达到预先约定标准。
+未来每个阶段新增docs/versions/Vn.md，填写输入版本、修改文件、运行命令、配置、原始数据位置和退出条件。已存在的V0/V1报告保留；V3和V4的内部检查点记录在各自阶段报告中，不要求新增正式Tag。报告与数据须标明七版路线身份；旧路线同名报告按2.1所述保留与映射，避免重名覆盖。阶段退出表示实现和证据齐全；是否可以宣称性能优化，还需实际收益达到预先约定标准。
 
 ### 2.3 待实现目录
 
@@ -411,9 +419,11 @@ Chunk Size是每请求上限，总Prefill Budget是Step总量，两者不同。�
 
 退出：证明Prefill造成ITL尖峰及固定最优Chunk是否随负载改变，保存容量曲线。如果固定策略稳定最优，保留负结果并简化控制器。
 
-## V3：Decode-Slack自适应预算
+## V3：完整SLO感知调度与保护机制
 
-### V3.1 实现任务
+依赖V2可信固定策略与共同容量基线，本版只使用BF16 KV。内部按Step预测 → Slack预算 → Hysteresis → Aging → KV Guard推进，各机制保留独立开关。每个检查点先通过正确性与局部验证，再开启下一机制；合并正式版本不合并实验变量。
+
+### V3.1 Step预测与Slack控制器
 
 先只用高精度KV。新增profile_step_time.py与替换式控制器。
 
@@ -429,15 +439,13 @@ tp_size, graph_mode, kv_dtype, attention_backend
 
 每Step：构造可行候选 → 估时 → 检查每请求Slack → 选最大预算 → 紧急下降/缓慢恢复 → 记录预测与实际。
 
-### V3.2 验证与退出
+### V3.2 Slack-only验证与内部检查点
 
 Slack-only vs 最佳固定Chunk：双SLO、Goodput、P99 ITL、TTFT、吞吐代价和budget-switch count。允许吞吐代价在实验前固定，例如5%，它是选择标准而非既成结果。
 
-退出：correctness通过、结果可重复、收益或失败可解释。若只改善ITL却恶化Goodput，不称为整体优化。
+Slack内部检查点：correctness通过、结果可重复、收益或失败可解释。若只改善ITL却恶化Goodput，不称为整体优化。
 
-## V4：Aging与KV水位保护
-
-### V4.1 实现任务
+### V3.3 Aging与KV水位保护
 
 将公平性和水位作为约束，不与Slack任意加权。
 
@@ -447,21 +455,39 @@ Slack-only vs 最佳固定Chunk：双SLO、Goodput、P99 ITL、TTFT、吞吐代�
 - 首版复用抢占选择，受害者优化另做消融。
 - KV不足或Decode已违约时记录约束冲突，不能靠参数宣称保证最大等待。
 
-### V4.2 消融与退出
+### V3.4 独立消融与整版退出
 
-| 组 | Slack | Aging | KV Guard |
-|---|---|---|---|
-| A | ✓ |  |  |
-| B | ✓ | ✓ |  |
-| C | ✓ | ✓ | ✓ |
+| 组 | 策略 | Slack | Aging | KV Guard |
+|---|---|---|---|---|
+| F | 最佳固定Chunk | 关闭 | 关闭 | 关闭 |
+| S | Slack-only | 开启 | 关闭 | 关闭 |
+| SA | Slack＋Aging | 开启 | 开启 | 关闭 |
+| SK | Slack＋KV Guard | 开启 | 关闭 | 开启 |
+| SAK | 完整策略 | 开启 | 开启 | 开启 |
+
+S/F评估自适应预算；SA/S与SK/S分别评估Aging与KV Guard；SAK/SA、SAK/SK检查组合条件下的增量与相互影响。各组使用相同执行后端、Trace、绝对到达率和共同基线容量，公平性及水位信号分别关闭时不应残留隐藏行为。
 
 预先定义starvation，例如等待超过指定阈值仍无Prefill进展；unfinished不得排除。报告Burst恢复、最大等待、ITL峰值、TTFT违约、Admission等待、preemption/recompute。
 
-产物：消融表与BF16最终策略。信号没有独立收益则从默认策略删除；保留失败实验。
+产物：冻结配置、预测器及独立误差报告、Budget轨迹、五组消融表与BF16最终策略。整版退出：状态正确，预先固定吞吐代价上限与调度验收门槛，收益或失败可重复解释；信号没有独立收益则从默认策略删除，保留失败实验，并同步调整简历中关于独立收益的表述。
 
-## V5：BF16 Paged GQA Decode参考
+## V4：量化KV参考、真实缓存与Gather执行闭环
 
-### V5.1 理论
+本版合并参考后端、量化数值契约与真实Cache接入。目标是得到能够运行模型、实际节省KV存储、可供融合Kernel对照的量化执行路径；Gather路径暂时变慢可以接受，但必须记录代价。
+
+### V4.1 实现顺序与内部检查点
+
+| 检查点 | 实现内容 | 通过条件 |
+|---|---|---|
+| V4-A | 后端接口、FP32真值、BF16 Paged GQA参考 | 分页寻址、Head映射、Mask与非量化输出正确 |
+| V4-B | FP8/INT8数值参考、设备编解码、Scale契约 | 格式与舍入测试通过，误差与转换成本可测 |
+| V4-C | 真实8-bit Cache、Triton写入、Gather+FA、Prefix生命周期 | 模型可运行，实际存储节省可测，初步质量与状态正确 |
+
+V4-A → V4-B → V4-C顺序推进，失败时在相应检查点定位。BF16 Kernel承担正确性参考和对照职责，不要求先做完整性能调优或在所有shape上超过原后端。首版交付一个实际可用的8-bit格式即可；FP8为主路线，INT8为设备能力不足时的后备，两者数据、命名与结果严格区分。提前按Graph固定地址与TP本地Head约束设计KV/Scale池及metadata，并安排小规模兼容性回归；完整Graph/TP验收仍在V6。
+
+### V4.2 V4-A 高精度分页GQA参考
+
+#### V4.2.1 理论
 
 先排除分页与GQA错误，再改变存储精度。FP32 Online Softmax维护m、l、acc：
 
@@ -476,7 +502,7 @@ output = acc/l
 
 空分区和全mask不能产生exp(-inf - -inf)的NaN。
 
-### V5.2 实现任务
+#### V4.2.2 实现任务
 
 1. 后端接口：store_kv、prefill、decode、workspace需求。
 2. PyTorch Gather+FP32 Attention真值。
@@ -486,7 +512,7 @@ output = acc/l
 6. 接入V1每层分支，保持Token输出顺序。
 7. 自写BF16与原后端独立计时，不要求所有shape获胜。
 
-### V5.3 验证与退出
+#### V4.2.3 验证与退出
 
 Batch=1/4/16/64；Context=1/P-1/P/P+1/511/1024/4096/8192，P是Block Size；D=64/128和模型实际值；GQA ratio=1/2/4/8；随机页、尾页、非连续数据。
 
@@ -494,9 +520,9 @@ Batch=1/4/16/64；Context=1/P-1/P/P+1/511/1024/4096/8192，P是Block Size；D=64
 
 退出：分页和GQA正确性通过，形成量化可信参考与shape延迟表。
 
-## V6：FP8/INT8参考与Scale契约
+### V4.3 V4-B 量化数值参考与Scale契约
 
-### V6.1 数值定义
+#### V4.3.1 数值定义
 
 主路线为FP8 E4M3FN，最大有限值448；明确区别E4M3FNUZ。首版K/V各自per-token、per-KV-head动态Scale，沿head_dim取amax：
 
@@ -512,7 +538,7 @@ FP8 qmax=448；INT8对称qmax=127、零点0、round-to-nearest。首版FP32计�
 
 K在RoPE之后量化，V按模型实际写入值；先检查模型执行顺序。权重、Q和MLP保持原精度，避免扩大变量。
 
-### V6.2 实现任务
+#### V4.3.2 实现任务
 
 - PyTorch/CPU量化参考和实际GPU转换；
 - 3090格式能力探测结果对应的软件或原生转换实现；
@@ -527,7 +553,7 @@ Scale契约还须规定rounding、clamp、scale_floor、存储dtype、Tensor str
 
 静态K+动态V、per-head或per-layer作为后续对照；静态Scale独立数据校准、分层/head保存，变化后旧Cache全部失效。
 
-### V6.3 容量核算
+#### V4.3.3 容量核算
 
 每层每Token/Head：
 
@@ -539,7 +565,7 @@ D=128：512 bytes vs 264 bytes，payload+Scale约1.94倍容量
 
 还需计入布局Padding、Block Table、Gather工作区、Graph和Allocator余量。KV容量不是整模型显存，也不等于吞吐/并发严格翻倍。
 
-### V6.4 验证与退出
+#### V4.3.4 验证与退出
 
 K/V分别统计MSE、最大误差、cosine、clipping比例和Scale分布；Teacher forcing固定相同历史做初步Logits检查。
 
@@ -547,9 +573,9 @@ K/V分别统计MSE、最大误差、cosine、clipping比例和Scale分布；Teac
 
 本阶段先建立quantization_contract.md与quality_budget.yaml草案，在独立评测前冻结。任务质量上限由BF16基线、数据集和用途决定，不在手册中预设一个通用“无损”数值。
 
-## V7：真实量化Cache、写入与Gather+FA接入
+### V4.4 V4-C 真实量化Cache与Gather接入
 
-### V7.1 实现任务
+#### V4.4.1 实现任务
 
 修改ModelRunner分配、Attention写入、BlockManager元数据。
 
@@ -558,11 +584,11 @@ K/V分别统计MSE、最大误差、cosine、clipping比例和Scale分布；Teac
 3. 禁止同批有效Slot冲突，检查随机Slot与页边界。
 4. 按Block Table Gather/反量化有效Context到BF16。
 5. Prefill接FA变长接口，核验分块Q绝对位置和causal对齐。
-6. Decode暂用相同量化Gather参考，为V8提供对照。
+6. Decode暂用相同量化Gather参考，为V5融合Decode提供对照。
 7. Workspace按层复用、有上限，不能反量化整模型所有层。
 8. 关闭量化走原BF16路径，不保留全量BF16 Shadow KV冒充节省。
 
-### V7.2 Prefix与生命周期
+#### V4.4.2 Prefix与生命周期
 
 KV字节与Scale共同组成Cache对象：
 
@@ -575,7 +601,7 @@ KV字节与Scale共同组成Cache对象：
 - refcount、有效长度、历史计算high_water独立维护。
 - Hash不覆盖尚未计算的尾部。
 
-### V7.3 验证与退出
+#### V4.4.3 验证与退出
 
 随机页/Slot、padding、重复Slot、部分写入、Prefix热/冷、抢占恢复、Scale复用、Chunked Prefill和长Context。
 
@@ -585,9 +611,15 @@ Prefill参考需逐Chunk核验有效KV长度和Query绝对位置。当Q长短于
 
 退出：真实存储节省可测，无BF16全量副本，量化参考模型稳定。Gather路径变慢也归档，不提前声称端到端加速。
 
-## V8：融合反量化Paged GQA Decode
+### V4.5 整版退出与质量准备
 
-### V8.1 基础Kernel
+三个检查点均通过；真实量化Cache不保留全量BF16 Shadow副本，Scale与Prefix生命周期回归通过，模型Teacher-forced logits及小规模任务质量已检查。记录BF16 KV、8-bit payload、Scale、Padding与临时Workspace，分别核算等逻辑容量和等字节预算。在本版划分Scale校准、策略调参和独立评测集，固定模型revision与模板，建立quality_budget.yaml并在独立评测前冻结，V6不得事后放宽门槛。V4暂不宣称融合或端到端加速，报告写明Gather路径代价和失败边界。
+
+## V5：融合反量化Paged GQA Decode
+
+依赖V4已通过的真实量化Cache、Scale契约与Gather参考，先正确再优化。本版保留为独立Kernel交付阶段，不改变既有量化格式与质量预算；量化质量和Kernel实现误差分别评估。
+
+### V5.1 基础Kernel
 
 ```text
 Q/context_len
@@ -602,7 +634,7 @@ Q/context_len
 
 不物化完整高精度KV。3090称FP8存储+高精度Attention计算，不能称原生FP8 Tensor Core加速。Token级Scale应应用到对应元素，不能错当全局常量。
 
-### V8.2 优化顺序
+### V5.2 优化顺序
 
 1. 一Query Head一程序先正确。
 2. Tile、num_warps、向量化加载。
@@ -620,7 +652,7 @@ Q/context_len
 
 共享加载是程序内复用还是L2复用需要Profiler证明。原生FP8 dot作为Blackwell可选扩展，不作为首版门槛。
 
-### V8.3 三组对照
+### V5.3 三组对照
 
 | 对照 | 目的 |
 |---|---|
@@ -634,9 +666,11 @@ Kernel数值门槛先在FP32参考与高精度实现上校准，再对“同一�
 
 退出：correctness通过，目标长Context对Gather有可测收益；比BF16慢的shape保留并解释，单Kernel加速不等于模型加速。
 
-## V9：Graph、TP与预测器重标定
+## V6：系统集成、最终质量与组合实验交付
 
-### V9.1 Graph任务
+依赖V3冻结的BF16调度策略、V4真实量化Cache与V5融合Kernel。本版集中完成量化路径的Graph/TP回归、预测器重标定和独立评测；质量预算及数据划分已在V4准备。V1非量化TP/Graph证据按已有报告核对，缺项须补齐；本版补齐量化写入、Scale、融合读取和页复用的回归。先完成兼容性与重标定，再进行正式端到端实验；任何格式、Scale或后端变更都须补对应回归与profile。
+
+### V6.1 Graph任务
 
 先量化纯Decode Graph，Mixed仍可eager。
 
@@ -650,7 +684,7 @@ Kernel数值门槛先在FP32参考与高精度实现上校准，再对“同一�
 
 记录Capture次数、Replay、hit、eager fallback、padding率、Graph显存。比较全eager、纯Decode Graph、Mixed eager，复杂Mixed Bucket可延期。
 
-### V9.2 TP任务
+### V6.2 TP任务
 
 - 本rank KV Heads独立量化，首版不增加全局Scale collective。
 - 核验本地Head整除和映射，不偷偷复制KV。
@@ -661,7 +695,7 @@ Kernel数值门槛先在FP32参考与高精度实现上校准，再对“同一�
 
 单卡/双卡对照同模型、精度、后端和负载，不能换条件声称TP加速。
 
-### V9.3 重标定
+### V6.3 重标定
 
 量化、融合、Graph改变时延，重新profile并按kv_dtype/backend/TP/Graph区分模型。Prefill预测包含Gather成本；不能只更新Decode。无匹配profile时保守回退。
 
@@ -676,15 +710,13 @@ workspace_peak_bytes
 
 核验冻结BlockManager是在Admission时预分配完整Prompt，还是按Chunk增量分配。Chunked Prefill只保证计算分块，不自动减少已预留KV容量。首版保留原分配策略并准确报告；若新增增量分配，应独立提交、补齐抢占/Prefix/页复用测试，并在消融中单列。
 
-### V9.4 验证与退出
+### V6.4 集成验证与内部检查点
 
 连续Replay改变Context、页映射、Prefix、抢占与页复用，eager/Graph对齐；TP=2长时压力。
 
-退出：无过期Scale/Context，无跨rank状态错误，纯Decode Graph正确，量化预测器单独归档。解释Graph/TP收益或退化。
+集成检查点：无过期Scale/Context，无跨rank状态错误，纯Decode Graph正确，量化预测器单独归档。解释Graph/TP收益或退化。
 
-## V10：质量、组合实验与交付
-
-### V10.1 三层质量评估
+### V6.5 三层质量评估
 
 1. Kernel vs 相同量化参考：寻址、Mask、Softmax正确。
 2. BF16 vs 量化Teacher-forced logits：固定同一Token历史，MAE/最大误差/cosine/KL/top1变化。
@@ -692,11 +724,11 @@ workspace_peak_bytes
 
 量化不要求100% BF16 Token一致。闭环生成早期分歧后，后续Logits历史不同，不能用它独立归因量化误差。
 
-划分Scale校准、策略调参和独立评测集。quality_budget.yaml预先固定可接受PPL/任务质量代价；质量门槛不能结果出来后重写。
+沿用V4划分的Scale校准、策略调参和独立评测集，以及独立评测前冻结的quality_budget.yaml。预先固定可接受PPL/任务质量代价；质量门槛不能结果出来后重写。
 
 质量不达标时调整Scale或局部高精度回退，重新核算存储；高cosine不能替代任务质量。任务分数变化写百分点，PPL写绝对和相对变化。
 
-### V10.2 组合消融
+### V6.6 组合消融
 
 | 组 | 调度 | Cache | Decode |
 |---|---|---|---|
@@ -709,7 +741,7 @@ workspace_peak_bytes
 
 B/A证明调度；D/C证明融合；E/D证明量化后的调度；E/B观察量化整体增量。自写BF16与原后端差异另列，不能混入量化收益。
 
-### V10.3 公平容量实验
+### V6.7 公平容量实验
 
 **等逻辑容量**：相同Block/Token容量，隔离访存与计算变化。
 
@@ -717,7 +749,7 @@ B/A证明调度；D/C证明融合；E/D证明量化后的调度；E/B观察量�
 
 最大并发按固定输入/输出长度和持续时间定义，不用OOM前瞬时请求数。两组都报告KV payload、Scale、Workspace、Graph、峰值总显存。
 
-### V10.4 实验矩阵
+### V6.8 实验矩阵
 
 - Qwen3-4B统一快速验证、质量评估与主结果，冻结同一revision及BF16权重；
 - 3090 TP=1/2；Blackwell独立扩展；
@@ -731,7 +763,7 @@ B/A证明调度；D/C证明融合；E/D证明量化后的调度；E/B观察量�
 
 主指标：双SLO Goodput、Cohort违约、TTFT/ITL分位数、吞吐、unfinished、最大等待/starvation、KV容量、recompute、Graph hit、Kernel延迟和质量。
 
-### V10.5 Profiler与失效边界
+### V6.9 Profiler与失效边界
 
 NVTX：
 
@@ -746,11 +778,15 @@ Nsight Systems看系统、拷贝、空隙和通信；Nsight Compute看Kernel。�
 
 必须回答：低负载控制器成本；短Context反量化开销；GQA组大小收益；Gather对TTFT；等容量无收益而扩容后有收益；权重访存主导；TP通信抵消；过载SLO不可满足；量化质量随长度变化。
 
-### V10.6 产物与PR
+### V6.10 产物与PR
 
 README、设计/契约、环境、Tag、冻结配置、原始CSV/JSONL、绘图脚本、质量/性能报告、Profiler Trace。
 
 优先小型PR：独立测试、Bug修复、指标或Kernel。完整研究策略保留fork。提交与合并分别表述，不预写已合入。
+
+### V6.11 整版退出与最终声明
+
+量化纯Decode Graph与TP=2回归通过，量化/融合/Graph对应预测器单独归档，独立任务质量满足预先冻结预算，组合消融与两类容量实验完成。每个关键对照保留至少3个seed、样本数、原始数据、冻结配置与可重放命令；未取得收益的shape和负载同样交付。性能结果、数值正确性、任务质量与功能兼容性分别陈述；简历只填写实际完成且有证据支持的内容，不能保证所有指标同时改善。
 
 ## 3. 配置、数据与回归规范
 
@@ -852,6 +888,19 @@ preemptions, recomputed_tokens
 - 每条最终选3–4个最有力数字；不单列泛化压测条目。
 - 3090路径写量化存储、反量化后计算，不写原生FP8加速。
 
+### 4.1 简历能力与版本证据对应
+
+| 简历能力 | 主要版本 | 填写前需要的证据 |
+|---|---|---|
+| Mixed Batch、计算进度、Block/Slot、非量化对齐 | V1 | 状态矩阵、通过数量、Greedy与logits对齐报告 |
+| 长Prompt期间Decode Stall改善 | V1＋V2 | 原始引擎与Mixed执行正式对照、相同负载及原始Token时间 |
+| Slack、Hysteresis、Aging与KV Guard | V2＋V3 | 最佳固定基线、预测误差、五组独立消融与吞吐代价 |
+| FP8写入、Scale、真实分页KV、Gather+FA、Prefix | V4 | 实际格式支持、真实显存含Scale核算、Cache生命周期与初步质量 |
+| 融合反量化、GQA与Online Softmax | V5 | 同量化参考正确性、Gather/Fused/BF16微基准 |
+| CUDA Graph、量化TP、SLO Goodput与长上下文质量 | V6 | Replay/TP回归、重标定profile、组合实验、独立质量报告 |
+
+当前V0、V1已实现，后续版本内容仍按完成情况填写。外部简历若仍写Qwen3-8B，应与本项目Qwen3-4B实测模型同步；采用INT8后备时，技术栈、项目条目和图表同步改为INT8。版本合并保证功能与证据覆盖，不预先保证延迟降低、Goodput提升或质量达标。
+
 ## 5. 开工顺序与参考资料
 
 ### 5.1 每阶段流程
@@ -864,7 +913,18 @@ preemptions, recomputed_tokens
 
 阶段报告写：改动、基线、测试、收益、代价、失败原因和后续前置。没有可重复证据时不写成最终成果。
 
-### 5.2 参考链接
+### 5.2 V0与V1之后的推进顺序
+
+1. 核对V0/V1已有报告与缺失验收项，保留原实现、入口和数据，补齐缺口。
+2. V2完成固定策略、共同容量与正式Decode Stall基线，冻结对照条件。
+3. V3先Slack-only，再独立开启Aging与KV Guard，完成五组消融，冻结BF16最终策略。
+4. V4依次通过V4-A/V4-B/V4-C，建立真实量化执行闭环，冻结质量预算。
+5. V5替换Decode为融合Kernel，完成相同量化参考、Gather与BF16三组对照。
+6. V6完成量化Graph/TP回归，重标定预测器，再跑独立质量、组合消融与公平容量实验。
+
+内部检查点分别保留提交与测试记录，可在同一阶段报告中整理；正式版本只在整版退出条件满足后打Tag。已有通过证据在模型、配置与接口不受本次变更影响时可复用；新增功能或受影响路径须补回归。测量契约、测试矩阵、原始数据与失败记录不因合并版本删减。
+
+### 5.3 参考链接
 
 文档与代码核验于2026-09-29；开发时固定对应commit/依赖版本，API可随上游变化。
 
