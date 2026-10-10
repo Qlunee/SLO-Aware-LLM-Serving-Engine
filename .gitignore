@@ -193,3 +193,12 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Generated experiment artifacts stay on the experiment server.
+/results/raw/
+/results/processed/
+/logs/
+/profiling/nsys/
+/profiling/ncu/
+/model/
+/models/

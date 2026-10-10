@@ -369,6 +369,16 @@ Batch=1/2/8/32，Chunk=256/512/1024/2048，跨页、Prefix命中、长Prompt插�
 
 产物：Mixed设计、状态测试、通过数量、Logits误差、Decode Stall原始数据。退出：无重复采样、跨请求泄漏、Block引用泄漏，统一前向语义明确。
 
+### V1.4 实现入口（2026-10-10）
+
+新增独立Mixed执行路径，保留V0引擎。逐文件实现、基础/GPU/在线测试命令、数值口径和验收边界见`versions/V1.md`。代码已存在不等于完整矩阵或正式性能实验已通过。语言fixture与随机Token压力测试分开，已发现的失败记录保留，不能将单轮烟雾结果作为简历性能收益。
+
+```bash
+bash scripts/test_v1.sh --cpu
+CUDA_VISIBLE_DEVICES=0 bash scripts/test_v1.sh --gpu --tp 1
+CUDA_VISIBLE_DEVICES=0 bash scripts/test_v1_online.sh
+```
+
 ## V2：固定策略与工作负载基线
 
 ### V2.1 实现任务

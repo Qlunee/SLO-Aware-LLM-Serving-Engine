@@ -13,3 +13,9 @@ FlashAttention、Paged KV Cache、Prefix Cache、CUDA Graph、Tensor Parallel及
 新增configs/qwen3_4b.json与benchmarks/defaults.py集中管理模型身份、目录和冻结revision；V0入口及GPU脚本读取同一默认值，保留显式覆盖和revision校验。example.py/bench.py改为共享4B默认模型并提供--model/--tp，未修改nanovllm模型或Attention实现。新增scripts/env_qwen3_4b.sh只导出变量、不安装环境。环境摘要补充NCCL路由设置及共享配置哈希，新增默认值回归测试。
 
 README、V0文档、实验协议和本地项目手册同步取消“0.6B先验收/8B主结果”，V0–V10统一4B。历史原始实验不修改，上游SHA不变；本次配置修改不代表后续Mixed/量化功能已完成。
+
+## 2026-10-10：V1可选混合执行
+
+新增MixedSequence/Scheduler/ModelRunner/LLMEngine和不可变BatchMetadata，重构新增路径的调度/状态提交与采样行选择。原引擎保留不变；原Attention/Context只增加可选Mixed分支。新增helper调用现有FlashAttention，不把FA/Paged KV/Graph/TP/NCCL列为原创。
+
+新增V1 CPU/GPU测试、固定历史Logits及Greedy对照、开放环观测适配和在线对照脚本。标准语言fixture与随机ID压力测试分开，严格allclose与显式BF16门槛分别记录，原始失败记录保留。单rank跳过不必要的NCCL collective，TP>1保留容量归约与元数据摘要检查。V1不实现SLO控制器、Aging、水位保护、FP8 KV或融合量化Attention。

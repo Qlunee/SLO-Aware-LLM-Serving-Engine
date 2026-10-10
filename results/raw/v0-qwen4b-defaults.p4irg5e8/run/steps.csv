@@ -1,3 +1,0 @@
-step_id,start_ns,end_ns,duration_ms,schedule_ms,run_ms,postprocess_ms,phase,num_requests,prefill_tokens,num_decode,sum_context,max_context,used_blocks,total_blocks,waiting,running,recomputed_tokens,preemptions,token_budget,kv_dtype,kv_payload_bytes,scale_bytes,graph_mode,min_slack,predicted_ms,workspace_bytes
-1,105217,1449993636,1449.888419,0.056897,1449.780457,0.017174,prefill,2,64,0,64,32,2,109,0,2,0,0,256,torch.bfloat16,4114612224,0,eager,,,
-2,1450037187,1551854859,101.817672,0.01251,101.732932,0.035399,decode,2,0,2,66,33,0,109,0,0,0,0,256,torch.bfloat16,4114612224,0,eager,,,

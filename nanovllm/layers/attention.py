@@ -59,6 +59,10 @@ class Attention(nn.Module):
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
+        if context.mixed is not None:
+            from nanovllm.layers.mixed_attention import forward_mixed
+            return forward_mixed(q, k, v, k_cache, v_cache,
+                                 context, self.scale, store_kvcache)
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
         if context.is_prefill:
