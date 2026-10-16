@@ -8,7 +8,9 @@ def run_case(engine, case, settings, add, observe):
     scheduler.max_num_batched_tokens = settings.token_budget
     scheduler.chunk_size = 256
     d, p, m = (case[k] for k in ("decode_count", "prefill_budget", "prefill_requests"))
-    base = [add(case["context_tokens"], decode_output_limit(settings, case)) for _ in range(d)]
+    base = [add(case["context_tokens"] if i % 2 == 0 or not case["alternate_context_tokens"]
+                else case["alternate_context_tokens"], decode_output_limit(settings, case))
+            for i in range(d)]
     for _ in range(10000):
         if all(scheduler.sequences[i].status.name == "RUNNING" for i in base):
             break
@@ -19,7 +21,8 @@ def run_case(engine, case, settings, add, observe):
     scheduler.chunk_size = p//m if p else 256
     for episode in range(settings.warmup+settings.repeats):
         warmup = episode < settings.warmup
-        inserted = [add(2*(p//m)+1, 2) for _ in range(m)] if p else []
+        prompt = (p//m if settings.prefill_shape == "exact" else 2*(p//m)+1) if p else 0
+        inserted = [add(prompt, 2) for _ in range(m)] if p else []
         for local_step in range(100):
             batch, result, times = timed_step(engine)
             observe(case, episode, local_step, warmup, batch, result, times)

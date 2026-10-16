@@ -6,12 +6,34 @@ from time import perf_counter_ns
 from .protocol import load_profile, predictor_module, read, save, seal, sha, verify_artifacts
 
 
+WORKFLOW_SOURCE_CHANGES = frozenset((
+    "benchmarks/profile_step_time.py",
+    "benchmarks/v3_profile/protocol.py",
+    "benchmarks/v3_profile/driver.py",
+    "benchmarks/v3_profile/report.py",
+    "benchmarks/v3_slack/run.py",
+    "benchmarks/v3_slack/observed_engine.py",
+    "nanovllm/engine/slack_scheduler.py",
+))
+
+
+def compatible_identity(left, right):
+    """Permit profile matrix/policy edits while retaining the measured V1 path."""
+    if {k: v for k, v in left.items() if k != "source_sha256"} != {
+            k: v for k, v in right.items() if k != "source_sha256"}:
+        return False
+    old, new = left.get("source_sha256", {}), right.get("source_sha256", {})
+    return all(old.get(name) == new.get(name) or name in WORKFLOW_SOURCE_CHANGES
+               or name.startswith("tests/") or name.startswith("scripts/")
+               for name in set(old) | set(new))
+
+
 def profiles(paths, split):
     loaded = [(Path(p).resolve(), *load_profile(p)) for p in paths]
     if not loaded:
         raise ValueError("no profiles")
     identities = [protocol["identity"] for _, protocol, _ in loaded]
-    if any(identity != identities[0] for identity in identities):
+    if any(not compatible_identity(identity, identities[-1]) for identity in identities):
         raise ValueError("execution/model/source identities differ across profiles")
     if any(p["split"] != split or p["smoke_only"] for _, p, _ in loaded):
         raise ValueError(f"requires non-smoke {split} profiles")
@@ -21,11 +43,11 @@ def profiles(paths, split):
     return loaded
 
 
-def fit(paths, out, min_samples=30):
+def fit(paths, out, min_samples=30, widths=None):
     loaded = profiles(paths, "train")
     estimator = predictor_module()
     table = estimator.fit_table([r for _, _, rows in loaded for r in rows],
-                                loaded[0][1]["identity"], min_samples)
+                                loaded[-1][1]["identity"], min_samples, widths)
     if not any(b["count"] >= min_samples for b in table["buckets"].values()):
         raise ValueError("no adequately sampled buckets; collect more data before fitting")
     table["training_profiles"] = [{"path": str(folder), "seed": p["seed"],
@@ -37,7 +59,8 @@ def fit(paths, out, min_samples=30):
     save(out/"fit_summary.json", {"training_samples": table["training_sample_count"],
         "buckets": len(table["buckets"]),
         "supported_buckets": sum(b["count"] >= min_samples for b in table["buckets"].values()),
-        "min_samples": min_samples, "independent_evaluation_pending": True})
+        "min_samples": min_samples, "bucket_widths": table["bucket_widths"],
+        "independent_evaluation_pending": True})
     seal(out)
     return read(out/"fit_summary.json")
 
@@ -62,7 +85,10 @@ def evaluate(predictor_path, paths, out):
     table = read(predictor_path)
     loaded = profiles(paths, "eval")
     estimator = predictor_module()
-    predictor = estimator.StepPredictor(table, loaded[0][1]["identity"])
+    if any(not compatible_identity(table["identity"], p["identity"])
+           for _, p, _ in loaded):
+        raise ValueError("predictor and evaluation execution/model/source identity differs")
+    predictor = estimator.StepPredictor(table, table["identity"])
     train_seeds = {p["seed"] for p in table["training_profiles"]}
     if train_seeds.intersection(p["seed"] for _, p, _ in loaded):
         raise ValueError("training/evaluation seeds overlap")

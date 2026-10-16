@@ -8,7 +8,7 @@ import unittest
 
 from benchmarks.v3_profile.protocol import (Settings, TIMING_CONTRACT, planned_cases,
     predictor_module, load_profile, save, seal, read)
-from benchmarks.v3_profile.report import fit, evaluate, summarize_predictions
+from benchmarks.v3_profile.report import fit, evaluate, summarize_predictions, compatible_identity
 from benchmarks.v3_profile.timing import timed_step
 
 estimator = predictor_module()
@@ -67,6 +67,19 @@ class PredictorTests(unittest.TestCase):
                          estimator.bucket_key(features(max_context_len=512, sum_context_tokens=512)))
         self.assertNotEqual(estimator.bucket_key(features(max_context_len=512, sum_context_tokens=512)),
                             estimator.bucket_key(features(max_context_len=513, sum_context_tokens=513)))
+
+    def test_optional_decode_and_sample_widths_cover_nearby_counts(self):
+        widths = {"decode_count": 4, "sample_count": 4}
+        fourth = features(decode_count=4, sample_count=4,
+                          sum_context_tokens=1028)
+        table = estimator.fit_table([sample(10)]*12 + [
+            {"features": fourth, "step_time_ms": 15, "warmup": False}]*12,
+            {}, 12, widths)
+        prediction = estimator.StepPredictor(table, {}).predict(
+            features(decode_count=2, sample_count=2, sum_context_tokens=514))
+        self.assertTrue(prediction.supported)
+        self.assertEqual(prediction.sample_count, 24)
+        self.assertEqual(prediction.predicted_ms, 15)
 
     def test_invalid_features_and_timings_rejected(self):
         for bad in (features(decode_count=-1), features(sample_count=0),
@@ -132,6 +145,59 @@ def fixture_profile(path, split, seed, identity=None):
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_workflow_source_change_keeps_profile_compatibility(self):
+        old = {"model_revision": "same", "source_sha256": {
+            "nanovllm/engine/mixed_scheduler.py": "v1",
+            "benchmarks/v3_profile/timing.py": "clock",
+            "benchmarks/v3_profile/driver.py": "old"}}
+        new = json.loads(json.dumps(old))
+        new["source_sha256"]["benchmarks/v3_profile/driver.py"] = "new"
+        self.assertTrue(compatible_identity(old, new))
+        new["source_sha256"]["nanovllm/engine/mixed_scheduler.py"] = "changed"
+        self.assertFalse(compatible_identity(old, new))
+
+    def test_exact_prefill_profile_round_trips_through_sealed_loader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)/"exact"
+            folder.mkdir()
+            settings = replace(Settings(), decode_counts=(0,),
+                prefill_budgets=(512,), contexts=(256,),
+                prefill_request_counts=(2,), prefill_shape="exact",
+                repeats=2, warmup=1)
+            case = planned_cases(settings)[0]["case_id"]
+            rows = []
+            for episode in range(3):
+                for local_step in range(2):
+                    step_id = len(rows)
+                    start = step_id*100_000_000
+                    shape = ({"decode_count": 0, "prefill_tokens": 512,
+                              "prefill_request_count": 2, "sum_context_tokens": 512,
+                              "max_context_len": 256, "sample_count": 2,
+                              "prefill_has_history": False, "graph_mode": "eager"}
+                             if local_step == 0 else
+                             {"decode_count": 2, "prefill_tokens": 0,
+                              "prefill_request_count": 0, "sum_context_tokens": 514,
+                              "max_context_len": 257, "sample_count": 2,
+                              "prefill_has_history": False, "graph_mode": "eager"})
+                    rows.append({"step_id": step_id, "case_id": case,
+                        "episode": episode, "episode_step": local_step,
+                        "warmup": episode == 0, "features": shape,
+                        "start_ns": start, "scheduled_ns": start+100,
+                        "run_end_ns": start+9_999_900,
+                        "visible_ns": start+10_000_000, "step_time_ms": 10})
+            save(folder/"protocol.json", {"schema": "v3-step-profile-v1",
+                "split": "train", "seed": 621, "smoke_only": False,
+                "identity": {"timing_contract": TIMING_CONTRACT},
+                "settings": asdict(settings)})
+            save(folder/"summary.json", {"valid": True,
+                "recorded_steps": 6, "measured_steps": 4,
+                "completed_cases": [case], "preemptions": 0,
+                "source_unchanged": True, "state_and_drain_passed": True})
+            (folder/"steps.jsonl").write_text("".join(json.dumps(r)+"\n" for r in rows))
+            seal(folder)
+            _, loaded = load_profile(folder)
+            self.assertEqual(len(loaded), 6)
+
     def test_offline_fit_and_independent_evaluation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -235,8 +301,62 @@ class PlanningTests(unittest.TestCase):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
                 settings.validate()
 
+    def test_exact_prefill_shape_plans_first_token_samples(self):
+        settings = replace(Settings(), decode_counts=(0,), prefill_budgets=(512,),
+                           contexts=(256,), prefill_request_counts=(2,),
+                           prefill_shape="exact", repeats=2, warmup=1)
+        settings.validate()
+        self.assertEqual(len(planned_cases(settings)), 1)
+        self.assertEqual(settings.prefill_shape, "exact")
+
+    def test_alternating_decode_contexts_are_named_and_capacity_checked(self):
+        settings = replace(Settings(), decode_counts=(4,), prefill_budgets=(256,),
+                           contexts=(256,), prefill_request_counts=(1,),
+                           alternate_context_tokens=1024, repeats=2, warmup=1)
+        settings.validate()
+        self.assertEqual(planned_cases(settings)[0]["case_id"], "d4-p256-m1-c256-a1024")
+        self.assertEqual(planned_cases(settings)[0]["alternate_context_tokens"], 1024)
+        with self.assertRaisesRegex(ValueError, "KV cap"):
+            replace(settings, kv_block_cap=2).validate()
+
 
 class SchedulerIntegrationTests(unittest.TestCase):
+    def test_driver_bootstraps_alternating_decode_contexts(self):
+        import test_v1_state as state
+        from benchmarks.v3_profile.driver import run_case
+        state.setUpModule()
+        try:
+            settings = replace(Settings(), decode_counts=(4,), prefill_budgets=(512,),
+                               contexts=(256,), prefill_request_counts=(2,),
+                               alternate_context_tokens=1024, repeats=1, warmup=1)
+            case = planned_cases(settings)[0]
+            config = SimpleNamespace(max_num_seqs=settings.max_num_seqs,
+                max_num_batched_tokens=settings.token_budget, eos=2, kvcache_block_size=256,
+                num_kvcache_blocks=settings.kv_block_cap, max_model_len=settings.max_model_len)
+            scheduler = state.Scheduler(config, 256)
+            def call(method, batch, logits, verify, greedy):
+                return {"tokens": {i: 1000 for i in batch.sample_seq_ids}, "graph_mode": "eager"}
+            engine = SimpleNamespace(scheduler=scheduler, greedy=True,
+                model_runner=SimpleNamespace(call=call), is_finished=scheduler.is_finished)
+            engine.step = lambda: timed_step(engine)
+            lengths = []
+            def add(length, output):
+                lengths.append(length)
+                seq = state.Sequence([100+len(lengths)]*length,
+                                     state.Params(max_tokens=output, ignore_eos=True))
+                scheduler.add(seq)
+                return seq.seq_id
+            observed = []
+            run_case(engine, case, settings, add,
+                     lambda _c, _e, _s, _w, batch, result, _t:
+                     observed.append(estimator.batch_features(batch, result["graph_mode"])))
+            self.assertEqual(lengths[:4], [256, 1024, 256, 1024])
+            self.assertEqual(len(observed), 8)
+            self.assertTrue(any(f["prefill_request_count"] == 2 and f["prefill_has_history"]
+                                for f in observed))
+        finally:
+            state.tearDownModule()
+
     def test_controlled_driver_uses_real_scheduler_and_drains_every_case(self):
         import test_v1_state as state
         from benchmarks.v3_profile.driver import run_case
@@ -280,6 +400,46 @@ class SchedulerIntegrationTests(unittest.TestCase):
             self.assertTrue(any(f["prefill_has_history"] for f in measured))
             self.assertTrue(any(f["prefill_tokens"] and f["sample_count"] == 0 for f in measured))
             self.assertTrue(any(f["decode_count"] and f["prefill_request_count"] == 2 for f in measured))
+        finally:
+            state.tearDownModule()
+
+    def test_exact_prefill_shape_samples_multiple_first_tokens(self):
+        import test_v1_state as state
+        from benchmarks.v3_profile.driver import run_case
+        state.setUpModule()
+        try:
+            settings = replace(Settings(), decode_counts=(0,),
+                               prefill_budgets=(512,), contexts=(256,),
+                               prefill_request_counts=(2,), prefill_shape="exact",
+                               repeats=2, warmup=1)
+            config = SimpleNamespace(max_num_seqs=settings.max_num_seqs,
+                max_num_batched_tokens=settings.token_budget, eos=2,
+                kvcache_block_size=256, num_kvcache_blocks=settings.kv_block_cap,
+                max_model_len=settings.max_model_len)
+            scheduler = state.Scheduler(config, 256)
+            engine = SimpleNamespace(scheduler=scheduler, greedy=True,
+                model_runner=SimpleNamespace(call=lambda method, batch, logits, verify, greedy:
+                    {"tokens": {i: 1000 for i in batch.sample_seq_ids}, "graph_mode": "eager"}),
+                is_finished=scheduler.is_finished)
+            engine.step = lambda: timed_step(engine)
+            serial = 0
+            def add(length, output):
+                nonlocal serial
+                serial += 1
+                seq = state.Sequence([100+serial]*length,
+                                     state.Params(max_tokens=output, ignore_eos=True))
+                scheduler.add(seq)
+                return seq.seq_id
+            observed = []
+            run_case(engine, planned_cases(settings)[0], settings, add,
+                lambda case, episode, local_step, warmup, batch, result, times:
+                    observed.append((local_step, estimator.batch_features(batch, result["graph_mode"]))))
+            self.assertEqual(len(observed), 2*(settings.warmup+settings.repeats))
+            first_steps = [f for step, f in observed if step == 0]
+            self.assertTrue(all(f["prefill_tokens"] == 512 and
+                                f["prefill_request_count"] == 2 and
+                                f["sample_count"] == 2 and
+                                not f["prefill_has_history"] for f in first_steps))
         finally:
             state.tearDownModule()
 

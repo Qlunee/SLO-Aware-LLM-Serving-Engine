@@ -2,12 +2,6 @@
 
 Use via the existing nanovllm package on the server; CPU tests load this file
 directly to avoid executing nanovllm's CUDA-dependent package initializer.
-请求批次
-  -> 提取特征 batch_features()
-  -> 校验特征 validate_features()
-  -> 特征分桶 bucket_key()
-  -> 用历史样本 fit_table() 建表
-  -> StepPredictor.predict() 查询预测结果
 """
 from dataclasses import dataclass
 import json
@@ -21,11 +15,11 @@ FEATURE_FIELDS = ("decode_count", "prefill_tokens", "prefill_request_count",
                   "prefill_has_history")
 DEFAULT_WIDTHS = {"prefill_tokens": 256, "sum_context_tokens": 2048,
                   "max_context_len": 256}
+OPTIONAL_WIDTH_FIELDS = {"decode_count", "sample_count"}
 
 
 def percentile(values, q):
     """Nearest-rank quantile; no NumPy dependency or interpolation ambiguity."""
-    # 计算 P95 延迟
     values = sorted(values)
     if not values or not 0 < q <= 1 or any(
             not math.isfinite(v) or v < 0 for v in values):
@@ -34,7 +28,6 @@ def percentile(values, q):
 
 
 def batch_features(batch, graph_mode):
-    # 从实际 batch 中提取预测所需的特征
     contexts = [row.end_pos for row in batch.requests]
     result = {
         "decode_count": batch.num_decode_tokens,
@@ -49,7 +42,7 @@ def batch_features(batch, graph_mode):
     validate_features(result)
     return result
 
-# 校验提取的特征是否有效
+
 def validate_features(features):
     for name in FEATURE_FIELDS[:-1]:
         if type(features.get(name)) is not int or features[name] < 0:
@@ -73,10 +66,11 @@ def validate_features(features):
     if p and features["graph_mode"] != "eager":
         raise ValueError("V1 mixed/Prefill execution is eager")
 
-# 将特征映射到离散桶中
+
 def bucket_key(features, widths=DEFAULT_WIDTHS):
     validate_features(features)
-    if set(widths) != set(DEFAULT_WIDTHS) or any(
+    if (not set(DEFAULT_WIDTHS) <= set(widths)
+            or not set(widths) <= set(DEFAULT_WIDTHS) | OPTIONAL_WIDTH_FIELDS) or any(
             type(v) is not int or v <= 0 for v in widths.values()):
         raise ValueError("invalid bucket widths")
     values = []
@@ -91,7 +85,7 @@ def bucket_key(features, widths=DEFAULT_WIDTHS):
 def fit_table(rows, identity, min_samples=30, widths=None):
     if type(min_samples) is not int or min_samples < 1:
         raise ValueError("min_samples must be positive")
-    widths = dict(DEFAULT_WIDTHS if widths is None else widths)
+    widths = {**DEFAULT_WIDTHS, **(widths or {})}
     groups = {}
     for row in rows:
         if row.get("warmup"):

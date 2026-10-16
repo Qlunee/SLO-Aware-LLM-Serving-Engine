@@ -33,11 +33,16 @@ def main():
         collect_parser.add_argument("--"+name.replace("_", "-"), type=int,
                                     default=getattr(Settings(), name))
     collect_parser.add_argument("--memory", type=float, default=.8)
+    collect_parser.add_argument("--prefill-shape", choices=("long", "exact"), default="long")
+    collect_parser.add_argument("--alternate-context-tokens", type=int, default=0,
+                                help="alternate Decode prompts between --contexts and this length")
     collect_parser.add_argument("--plan-only", action="store_true", help="validate/print matrix without CUDA")
     fit_parser = sub.add_parser("fit")
     fit_parser.add_argument("--profiles", nargs="+", required=True)
     fit_parser.add_argument("--out", required=True)
     fit_parser.add_argument("--min-samples", type=int, default=30)
+    fit_parser.add_argument("--decode-count-width", type=int, default=1)
+    fit_parser.add_argument("--sample-count-width", type=int, default=1)
     eval_parser = sub.add_parser("evaluate")
     eval_parser.add_argument("--profiles", nargs="+", required=True)
     eval_parser.add_argument("--predictor", required=True)
@@ -54,7 +59,9 @@ def main():
         values = {name: getattr(args, name) for name in Settings.__dataclass_fields__}
         if args.smoke:
             values.update(decode_counts=(0, 1, 4), prefill_budgets=(0, 256),
-                          contexts=(256,), prefill_request_counts=(1,), repeats=2, warmup=1)
+                          contexts=(256,),
+                          prefill_request_counts=(1, 2) if args.prefill_shape == "exact" else (1,),
+                          repeats=2, warmup=1)
         settings = Settings(**values)
         settings.validate()
         if args.plan_only:
@@ -64,7 +71,12 @@ def main():
         result = {"profile": str(collect(args, settings))}
     elif args.command == "fit":
         from benchmarks.v3_profile.report import fit
-        result = fit(args.profiles, args.out, args.min_samples)
+        if args.decode_count_width < 1 or args.sample_count_width < 1:
+            parser.error("bucket widths must be positive")
+        widths = {name: width for name, width in (
+            ("decode_count", args.decode_count_width),
+            ("sample_count", args.sample_count_width)) if width > 1}
+        result = fit(args.profiles, args.out, args.min_samples, widths)
     elif args.command == "evaluate":
         from benchmarks.v3_profile.report import evaluate
         result = evaluate(args.predictor, args.profiles, args.out)

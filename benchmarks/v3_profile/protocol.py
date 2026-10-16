@@ -35,14 +35,20 @@ class Settings:
     max_num_seqs: int = 32
     memory: float = .8
     kv_block_cap: int = 256
+    prefill_shape: str = "long"
+    alternate_context_tokens: int = 0
 
     def validate(self):
+        if self.prefill_shape not in ("long", "exact"):
+            raise ValueError("invalid Prefill prompt shape")
         for name in ("decode_counts", "prefill_budgets", "contexts", "prefill_request_counts"):
             values = getattr(self, name)
             if not values or len(set(values)) != len(values) or any(type(v) is not int or v < 0 for v in values):
                 raise ValueError(f"invalid matrix: {name}")
         if min(self.contexts) < 1 or min(self.prefill_request_counts) < 1:
             raise ValueError("contexts/Prefill request counts must be positive")
+        if type(self.alternate_context_tokens) is not int or self.alternate_context_tokens < 0:
+            raise ValueError("invalid alternate Decode context")
         for name in ("repeats", "warmup", "max_model_len", "token_budget", "max_num_seqs", "kv_block_cap"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"invalid {name}")
@@ -53,8 +59,10 @@ class Settings:
 
 def decode_output_limit(settings, case):
     # Bootstrap may let early requests Decode while later ones still Prefill.
-    bootstrap_bound = math.ceil(case["context_tokens"]/256)*case["decode_count"]
-    return 4*(settings.repeats+settings.warmup) + bootstrap_bound + 8
+    longest = max(case["context_tokens"], case["alternate_context_tokens"])
+    bootstrap_bound = math.ceil(longest/256)*case["decode_count"]
+    episode_steps = 2 if settings.prefill_shape == "exact" else 4
+    return episode_steps*(settings.repeats+settings.warmup) + bootstrap_bound + 8
 
 
 def planned_cases(settings):
@@ -68,18 +76,26 @@ def planned_cases(settings):
                     if p and (p < m or p % m):
                         raise ValueError("Prefill budget must divide evenly across requests")
                     case = {"decode_count": d, "prefill_budget": p,
-                            "prefill_requests": m, "context_tokens": context}
+                            "prefill_requests": m, "context_tokens": context,
+                            "alternate_context_tokens": settings.alternate_context_tokens if d else 0}
                     if d+p > settings.token_budget or d+m > settings.max_num_seqs:
                         raise ValueError("case exceeds global token/request limit")
                     output = decode_output_limit(settings, case)
-                    prompt = 2*(p//m)+1 if p else 0
-                    if max(context+output if d else 0, prompt+1) > settings.max_model_len:
+                    prompt = (p//m if settings.prefill_shape == "exact"
+                              else 2*(p//m)+1) if p else 0
+                    longest = max(context, case["alternate_context_tokens"])
+                    if max(longest+output if d else 0, prompt+1) > settings.max_model_len:
                         raise ValueError("case may exceed model context; reduce repeats/length")
                     # Independent random prompts deliberately have no prefix sharing.
-                    blocks = d*math.ceil((context+output-1)/256) + m*math.ceil((prompt+1)/256)
+                    decode_contexts = [context if i % 2 == 0 or not case["alternate_context_tokens"]
+                                       else case["alternate_context_tokens"] for i in range(d)]
+                    blocks = sum(math.ceil((length+output-1)/256) for length in decode_contexts)
+                    blocks += m*math.ceil((prompt+1)/256)
                     if blocks > settings.kv_block_cap:
                         raise ValueError("case may exceed test KV cap; increase cap or reduce matrix")
                     name = f"d{d}-p{p}-m{m}-c{context}"
+                    if case["alternate_context_tokens"]:
+                        name += f"-a{case['alternate_context_tokens']}"
                     cases[name] = {"case_id": name, **case}
     if not cases:
         raise ValueError("empty case matrix")
@@ -131,7 +147,8 @@ def load_profile(folder):
         case = cases[row["case_id"]]
         if (type(row["episode"]) is not int or not 0 <= row["episode"] < settings.warmup+settings.repeats
                 or type(row["episode_step"]) is not int
-                or not 0 <= row["episode_step"] < (4 if case["prefill_budget"] else 1)
+                or not 0 <= row["episode_step"] < ((2 if settings.prefill_shape == "exact" else 4)
+                                                   if case["prefill_budget"] else 1)
                 or row["warmup"] != (row["episode"] < settings.warmup)):
             raise ValueError("invalid episode or warmup membership")
         signature = (row["case_id"], row["episode"], row["episode_step"])
@@ -147,7 +164,8 @@ def load_profile(folder):
             raise ValueError("Step duration differs from timestamp endpoints")
         if type(row.get("warmup")) is not bool:
             raise ValueError("missing warmup marker")
-    expected = sum((4 if c["prefill_budget"] else 1)*(settings.warmup+settings.repeats)
+    expected = sum(((2 if settings.prefill_shape == "exact" else 4)
+                    if c["prefill_budget"] else 1)*(settings.warmup+settings.repeats)
                    for c in cases.values())
     if len(observed) != expected:
         raise ValueError("missing case/episode samples")
