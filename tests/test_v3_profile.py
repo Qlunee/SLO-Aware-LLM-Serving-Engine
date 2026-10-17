@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 
 from benchmarks.v3_profile.protocol import (Settings, TIMING_CONTRACT, planned_cases,
-    predictor_module, load_profile, save, seal, read)
+    predictor_module, load_profile, save, seal, read, decode_context_lengths)
 from benchmarks.v3_profile.report import fit, evaluate, summarize_predictions, compatible_identity
 from benchmarks.v3_profile.timing import timed_step
 
@@ -145,6 +145,23 @@ def fixture_profile(path, split, seed, identity=None):
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_one_long_decode_prompt_obeys_kv_capacity(self):
+        settings = replace(Settings(), decode_counts=(20,), prefill_budgets=(512,),
+            contexts=(256,), prefill_request_counts=(4,), prefill_shape="exact",
+            alternate_context_tokens=1024, alternate_context_count=1,
+            repeats=32, warmup=3, kv_block_cap=48)
+        case = planned_cases(settings)[0]
+        self.assertEqual(decode_context_lengths(case), [1024] + [256] * 19)
+        self.assertIn("-a1024-n1", case["case_id"])
+        with self.assertRaisesRegex(ValueError, "KV cap"):
+            planned_cases(replace(settings, kv_block_cap=46))
+
+    def test_legacy_alternating_decode_prompts_remain_unchanged(self):
+        settings = replace(Settings(), decode_counts=(4,), prefill_budgets=(0,),
+            contexts=(256,), alternate_context_tokens=1024)
+        self.assertEqual(decode_context_lengths(planned_cases(settings)[0]),
+                         [256, 1024, 256, 1024])
+
     def test_workflow_source_change_keeps_profile_compatibility(self):
         old = {"model_revision": "same", "source_sha256": {
             "nanovllm/engine/mixed_scheduler.py": "v1",

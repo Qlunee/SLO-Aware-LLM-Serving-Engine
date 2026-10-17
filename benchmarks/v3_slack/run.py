@@ -1,4 +1,4 @@
-"""Paired Slack-only/fixed-256 smoke on a frozen V3 online trace.
+"""Paired Slack, optional Aging/Hysteresis/KV Guard, and fixed Chunks on a frozen V3 trace.
 
 The reused trace is suitable for correctness and diagnostic comparison, not
 an independent SLO performance claim.
@@ -68,10 +68,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", required=True, help="online_plan/rN from the completed terminal suite")
     parser.add_argument("--mode", choices=("poisson", "burst", "long_short"), required=True)
-    parser.add_argument("--policy", choices=("slack", "chunk-256"), required=True)
+    parser.add_argument("--policy", choices=("slack", "slack-hysteresis",
+                    "slack-aging", "slack-aging-hysteresis", "slack-kv",
+                    "slack-aging-kv", "slack-hysteresis-kv",
+                    "slack-aging-hysteresis-kv", "chunk-256", "chunk-512",
+                    "chunk-1024"), required=True)
     parser.add_argument("--predictor", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--safety-margin-ms", type=float, default=15.0)
+    parser.add_argument("--rise-steps", type=int, default=2)
+    parser.add_argument("--rise-margin-ms", type=float, default=10.0)
+    parser.add_argument("--aging-warning-ms", type=float, default=300.0)
+    parser.add_argument("--aging-hard-ms", type=float, default=800.0)
+    parser.add_argument("--kv-low-free-blocks", type=int, default=8)
+    parser.add_argument("--kv-high-free-blocks", type=int, default=16)
     parser.add_argument("--allow-cross-gpu-diagnostic", action="store_true",
                         help="same-model GPU with <=1 MiB size difference; diagnostic only")
     args = parser.parse_args()
@@ -125,12 +135,23 @@ def main():
             gpu_memory_utilization=s["memory"], kvcache_block_size=256,
             kv_block_cap=s["kv_block_cap"])
         predictor = StepPredictor(table, plan["identity"])
-        if args.policy == "slack":
+        fixed_chunk = int(args.policy.split("-", 1)[1]) if args.policy.startswith("chunk-") else None
+        slack_policy = fixed_chunk is None
+        if slack_policy:
             engine = ObservedSlackEngine(plan["model_path"], predictor,
-                safety_margin_ms=args.safety_margin_ms, **kwargs)
+                safety_margin_ms=args.safety_margin_ms,
+                hysteresis="hysteresis" in args.policy,
+                rise_steps=args.rise_steps, rise_margin_ms=args.rise_margin_ms,
+                aging="aging" in args.policy,
+                aging_warning_ms=args.aging_warning_ms,
+                aging_hard_ms=args.aging_hard_ms,
+                kv_guard="kv" in args.policy,
+                kv_low_free_blocks=args.kv_low_free_blocks,
+                kv_high_free_blocks=args.kv_high_free_blocks,
+                **kwargs)
         else:
             engine = ObservedFixedEngine(plan["model_path"], policy="chunk",
-                chunk_size=256, **kwargs)
+                chunk_size=fixed_chunk, **kwargs)
         if engine.config.num_kvcache_blocks != s["kv_block_cap"]:
             raise ValueError("common KV cap unavailable")
         if engine.model_runner.kv_cache.dtype != torch.bfloat16:
@@ -146,12 +167,15 @@ def main():
             raise ValueError(f"predictor runtime identity differs: {mismatches}")
         save(out/"environment.json", environment)
         warmup = prepare_warmup(engine, engine.config, trace)
-        if args.policy == "slack":
+        if slack_policy:
             engine.scheduler.last_visible_ns.clear()
             engine.scheduler.itl_slo_ms.clear()
             engine.scheduler.ttft_deadline_ns.clear()
             engine.scheduler.small_prefill_ms.clear()
             engine.scheduler.prefill_skip_steps = 0
+            engine.scheduler.reset_hysteresis()
+            engine.scheduler.reset_aging()
+            engine.scheduler.reset_kv_guard()
             for residuals in engine.scheduler.residuals.values():
                 residuals.clear()
         torch.cuda.synchronize()
@@ -174,6 +198,43 @@ def main():
             cross_gpu_diagnostic=args.allow_cross_gpu_diagnostic,
             runtime_gpu_identity=runtime["gpus"],
             scope="reused V3 online trace; diagnostic comparison, no independent SLO claim")
+        if slack_policy:
+            summary["hysteresis_hold_steps"] = sum(
+                row.get("decision_reason") == "hysteresis_hold" for row in engine.steps)
+            summary["hysteresis_raise_steps"] = sum(
+                row.get("decision_reason") == "hysteresis_raise" for row in engine.steps)
+            summary["mixed_prefill_budget_switches"] = sum(
+                row.get("num_decode", 0) > 0 and
+                row.get("hysteresis_previous_budget", 0) is not None and
+                row.get("hysteresis_previous_budget", 0) > 0 and
+                row.get("selected_prefill_budget") != row["hysteresis_previous_budget"]
+                for row in engine.steps)
+            summary["aging_warning_steps"] = sum(
+                row.get("aging_phase") == "warning" for row in engine.steps)
+            summary["aging_hard_steps"] = sum(
+                row.get("aging_phase") == "hard" for row in engine.steps)
+            summary["aging_priority_steps"] = sum(
+                row.get("aging_served") and
+                row.get("aging_promoted_position") is not None and
+                row["aging_promoted_position"] < row["aging_original_position"]
+                for row in engine.steps)
+            summary["aging_conflict_steps"] = sum(
+                row.get("aging_conflict") is not None for row in engine.steps)
+            summary["aging_max_wait_age_ms"] = max(
+                (row.get("aging_oldest_wait_ms") or 0 for row in engine.steps),
+                default=0)
+            summary["kv_guard_held_steps"] = sum(
+                row.get("kv_guard_active", False) for row in engine.steps)
+            summary["kv_guard_enter_steps"] = sum(
+                row.get("kv_guard_entered", False) for row in engine.steps)
+            summary["kv_guard_exit_steps"] = sum(
+                row.get("kv_guard_exited", False) for row in engine.steps)
+            summary["kv_guard_blocked_steps"] = sum(
+                bool(row.get("kv_guard_blocked_seq_ids")) for row in engine.steps)
+            summary["kv_guard_blocked_admissions"] = sum(
+                len(row.get("kv_guard_blocked_seq_ids", [])) for row in engine.steps)
+            summary["kv_guard_conflict_steps"] = sum(
+                row.get("kv_guard_conflict") is not None for row in engine.steps)
         save(out/"summary.json", summary)
         save(out/"requests.json", [asdict(r) for r in result.records])
         save(out/"steps.json", engine.steps)

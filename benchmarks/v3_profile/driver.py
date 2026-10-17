@@ -1,5 +1,5 @@
 """Finite controlled-case driver, independent of CUDA for state regression."""
-from .protocol import decode_output_limit
+from .protocol import decode_context_lengths, decode_output_limit
 from .timing import timed_step
 
 
@@ -8,9 +8,8 @@ def run_case(engine, case, settings, add, observe):
     scheduler.max_num_batched_tokens = settings.token_budget
     scheduler.chunk_size = 256
     d, p, m = (case[k] for k in ("decode_count", "prefill_budget", "prefill_requests"))
-    base = [add(case["context_tokens"] if i % 2 == 0 or not case["alternate_context_tokens"]
-                else case["alternate_context_tokens"], decode_output_limit(settings, case))
-            for i in range(d)]
+    base = [add(length, decode_output_limit(settings, case))
+            for length in decode_context_lengths(case)]
     for _ in range(10000):
         if all(scheduler.sequences[i].status.name == "RUNNING" for i in base):
             break

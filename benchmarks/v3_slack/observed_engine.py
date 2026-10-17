@@ -5,11 +5,20 @@ from nanovllm.engine.slack_scheduler import SlackScheduler
 
 class ObservedSlackEngine(ObservedMixedEngine):
     def __init__(self, model, predictor, *, safety_margin_ms=15.0,
-                 fallback_chunk=256, **kwargs):
+                 fallback_chunk=256, hysteresis=False, rise_steps=2,
+                 rise_margin_ms=10.0, aging=False, aging_warning_ms=300.0,
+                 aging_hard_ms=800.0, kv_guard=False,
+                 kv_low_free_blocks=8, kv_high_free_blocks=16, **kwargs):
         super().__init__(model, observation="minimal", sampler="greedy",
                          chunk_size=fallback_chunk, **kwargs)
         self.scheduler = SlackScheduler(self.config, predictor,
             safety_margin_ms=safety_margin_ms, fallback_chunk=fallback_chunk,
+            hysteresis=hysteresis, rise_steps=rise_steps,
+            rise_margin_ms=rise_margin_ms,
+            aging=aging, aging_warning_ms=aging_warning_ms,
+            aging_hard_ms=aging_hard_ms,
+            kv_guard=kv_guard, kv_low_free_blocks=kv_low_free_blocks,
+            kv_high_free_blocks=kv_high_free_blocks,
             clock=self.now)
         self.observation = "full"
         preempt = self.scheduler.preempt
@@ -28,7 +37,8 @@ class ObservedSlackEngine(ObservedMixedEngine):
     def submit(self, spec, record):
         super().submit(spec, record)
         self.scheduler.register_request(record.seq_id, record.itl_slo_ms,
-                                        record.ttft_slo_ms, record.arrival_ns)
+                                        record.ttft_slo_ms, record.arrival_ns,
+                                        record.enqueue_ns)
 
     def step(self):
         result = super().step()

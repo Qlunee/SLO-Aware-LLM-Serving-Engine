@@ -36,6 +36,8 @@ def main():
     collect_parser.add_argument("--prefill-shape", choices=("long", "exact"), default="long")
     collect_parser.add_argument("--alternate-context-tokens", type=int, default=0,
                                 help="alternate Decode prompts between --contexts and this length")
+    collect_parser.add_argument("--alternate-context-count", type=int, default=0,
+                                help="use this many alternate-length Decode prompts first; 0 keeps alternating")
     collect_parser.add_argument("--plan-only", action="store_true", help="validate/print matrix without CUDA")
     fit_parser = sub.add_parser("fit")
     fit_parser.add_argument("--profiles", nargs="+", required=True)

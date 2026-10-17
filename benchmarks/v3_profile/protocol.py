@@ -37,6 +37,7 @@ class Settings:
     kv_block_cap: int = 256
     prefill_shape: str = "long"
     alternate_context_tokens: int = 0
+    alternate_context_count: int = 0
 
     def validate(self):
         if self.prefill_shape not in ("long", "exact"):
@@ -49,6 +50,10 @@ class Settings:
             raise ValueError("contexts/Prefill request counts must be positive")
         if type(self.alternate_context_tokens) is not int or self.alternate_context_tokens < 0:
             raise ValueError("invalid alternate Decode context")
+        if type(self.alternate_context_count) is not int or self.alternate_context_count < 0:
+            raise ValueError("invalid alternate Decode context count")
+        if self.alternate_context_count and not self.alternate_context_tokens:
+            raise ValueError("alternate Decode context count requires a context length")
         for name in ("repeats", "warmup", "max_model_len", "token_budget", "max_num_seqs", "kv_block_cap"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"invalid {name}")
@@ -65,6 +70,19 @@ def decode_output_limit(settings, case):
     return episode_steps*(settings.repeats+settings.warmup) + bootstrap_bound + 8
 
 
+def decode_context_lengths(case):
+    """Keep legacy alternating prompts, or place a fixed number of long prompts first."""
+    d = case["decode_count"]
+    base = case["context_tokens"]
+    alternate = case["alternate_context_tokens"]
+    count = case.get("alternate_context_count", 0)
+    if not alternate:
+        return [base] * d
+    if count:
+        return [alternate] * min(d, count) + [base] * max(0, d-count)
+    return [base if i % 2 == 0 else alternate for i in range(d)]
+
+
 def planned_cases(settings):
     cases = {}
     for d in settings.decode_counts:
@@ -77,7 +95,8 @@ def planned_cases(settings):
                         raise ValueError("Prefill budget must divide evenly across requests")
                     case = {"decode_count": d, "prefill_budget": p,
                             "prefill_requests": m, "context_tokens": context,
-                            "alternate_context_tokens": settings.alternate_context_tokens if d else 0}
+                            "alternate_context_tokens": settings.alternate_context_tokens if d else 0,
+                            "alternate_context_count": settings.alternate_context_count if d else 0}
                     if d+p > settings.token_budget or d+m > settings.max_num_seqs:
                         raise ValueError("case exceeds global token/request limit")
                     output = decode_output_limit(settings, case)
@@ -87,8 +106,7 @@ def planned_cases(settings):
                     if max(longest+output if d else 0, prompt+1) > settings.max_model_len:
                         raise ValueError("case may exceed model context; reduce repeats/length")
                     # Independent random prompts deliberately have no prefix sharing.
-                    decode_contexts = [context if i % 2 == 0 or not case["alternate_context_tokens"]
-                                       else case["alternate_context_tokens"] for i in range(d)]
+                    decode_contexts = decode_context_lengths(case)
                     blocks = sum(math.ceil((length+output-1)/256) for length in decode_contexts)
                     blocks += m*math.ceil((prompt+1)/256)
                     if blocks > settings.kv_block_cap:
@@ -96,6 +114,8 @@ def planned_cases(settings):
                     name = f"d{d}-p{p}-m{m}-c{context}"
                     if case["alternate_context_tokens"]:
                         name += f"-a{case['alternate_context_tokens']}"
+                        if case["alternate_context_count"]:
+                            name += f"-n{case['alternate_context_count']}"
                     cases[name] = {"case_id": name, **case}
     if not cases:
         raise ValueError("empty case matrix")
